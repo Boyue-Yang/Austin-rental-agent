@@ -1,0 +1,8 @@
+outscraper
+apify-client
+python-dotenv
+playwright   # then: python -m playwright install (uses installed Google Chrome via channel="chrome")
+# analysis / modeling (install CUDA torch first: pip install torch --index-url https://download.pytorch.org/whl/cu126)
+torch
+bertopic
+sentence-transformers
