@@ -1,17 +1,20 @@
-"""Draw a rating-stratified random sample of reviews for manual reading / gold labeling.
+"""Draw a rating-stratified random sample of English Google reviews (exploration / topic modeling).
 
-The sample keeps the zip code's 1-5 star distribution (largest-remainder rounding) and
-uses a fixed seed, so reruns produce the same rows.
+Sample sizes per star rating are proportional to the population counts across the
+chosen ZIP codes (largest-remainder rounding), so the sample keeps the real 1-5 star
+mix. Fixed seed, so reruns produce the same rows. For the annotation (gold) sample
+with oversampled 2-4 star reviews, use build_gold_sample instead.
 
 Usage:
     python -m src.analysis.sample_reviews --zip 78705 --n 500
+    python -m src.analysis.sample_reviews --zip 78701 --zip 78705 --zip 78722 --n 1000
 """
 import argparse
-import csv
-import random
+
+import pandas as pd
 
 from src import config
-from src.db.schema import connect
+from src.analysis.text import load_google_reviews
 
 OUT_DIR = config.DB_PATH.parent / "samples"
 
@@ -25,47 +28,28 @@ def stratified_counts(dist: dict[int, int], n: int) -> dict[int, int]:
     return counts
 
 
-def main(zip_code: str, n: int, seed: int, source: str = "google_maps") -> None:
-    conn = connect()
-    sql = """SELECT review_id, place_id, property_name, rating, posted_at, text,
-                    owner_reply IS NOT NULL AS has_owner_reply, likes, source, complex_id
-             FROM review_dataset WHERE postal_code = ?"""
-    params = [zip_code]
-    if source != "all":
-        sql += " AND source = ?"
-        params.append(source)
-    rows = conn.execute(sql + " ORDER BY source, review_id", params).fetchall()
-    conn.close()
-    if not rows:
-        raise SystemExit(f"No reviews for ZIP {zip_code} and source {source}")
-    n = min(n, len(rows))
-    by_rating: dict[int, list] = {}
-    for r in rows:
-        by_rating.setdefault(r[3], []).append(r)
-    counts = stratified_counts({k: len(v) for k, v in by_rating.items()}, n)
-
-    rng = random.Random(seed)
-    sample = []
-    for rating in sorted(counts):
-        sample += rng.sample(by_rating[rating], counts[rating])
-    rng.shuffle(sample)  # don't present grouped by rating (avoids anchoring when labeling)
+def main(zips: list[str], n: int, seed: int) -> None:
+    df = load_google_reviews(zips)
+    if df.empty:
+        raise SystemExit(f"No reviews for ZIPs {zips}")
+    pop = df["rating"].value_counts().sort_index()
+    counts = stratified_counts(pop.to_dict(), min(n, len(df)))
+    sample = pd.concat(df[df["rating"] == r].sample(c, random_state=seed) for r, c in counts.items())
+    sample = sample.sample(frac=1, random_state=seed).reset_index(drop=True)  # don't group by rating
+    sample["weight"] = sample["rating"].map(lambda r: round(pop[r] / counts[r], 3))
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = "" if source == "google_maps" else f"_{source}"
-    out = OUT_DIR / f"reviews_{zip_code}{suffix}_sample{n}_seed{seed}.csv"
-    with out.open("w", newline="", encoding="utf-8-sig") as f:
-        w = csv.writer(f)
-        w.writerow(["review_id", "place_id", "property", "rating", "posted_at", "text", "has_owner_reply", "likes", "source", "complex_id"])
-        w.writerows(sample)
-    print(f"{len(rows)} reviews in {zip_code}; population {dict(sorted((k, len(v)) for k, v in by_rating.items()))}")
-    print(f"sample counts {dict(sorted(counts.items()))} -> {out}")
+    out = OUT_DIR / f"reviews_{'_'.join(sorted(zips))}_sample{len(sample)}_seed{seed}.csv"
+    sample.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"population {len(df)} reviews, by stars {pop.to_dict()}")
+    print(f"sample by stars {dict(sorted(counts.items()))}; by ZIP {sample['postal_code'].value_counts().to_dict()}")
+    print(f"-> {out}")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--zip", default="78705")
+    ap.add_argument("--zip", action="append", required=True, help="postal code (repeatable)")
     ap.add_argument("--n", type=int, default=500)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--source", choices=("google_maps", "apartmentratings", "all"), default="google_maps")
     args = ap.parse_args()
-    main(args.zip, args.n, args.seed, args.source)
+    main(args.zip, args.n, args.seed)

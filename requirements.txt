@@ -6,3 +6,4 @@ playwright   # then: python -m playwright install (uses installed Google Chrome 
 torch
 bertopic
 sentence-transformers
+openpyxl     # Excel annotation workbooks
